@@ -250,6 +250,46 @@ for snapshot in client.stream(interval=0.5):
 
 See [clients/python/README.md](../clients/python/README.md) for full documentation.
 
+## Step 8: Record and Replay State Changes
+
+Use `memglass-diff` to capture and analyze state changes over time:
+
+```bash
+# Stream live changes to terminal (1 second interval)
+./build/memglass-diff my_app
+
+# Record at 100ms intervals to a binary file
+./build/memglass-diff -i 100 -f binary -o session.mgd my_app
+```
+
+Let it run while your producer is active, then press Ctrl+C to stop recording.
+
+**Replay the recording:**
+
+```bash
+# Decode binary file to readable text
+./build/memglass-diff --decode session.mgd
+```
+
+Example output:
+
+```
+@1704825432123456789 seq:41->42
+  main_counter.value: 123 -> 124
+  main_counter.timestamp: 1704825432100000000 -> 1704825432200000000
+@1704825432223456789 seq:42->43
+  main_counter.value: 124 -> 125
+  global_stats.count: 123 -> 124
+```
+
+For JSON output (useful with `jq`):
+
+```bash
+./build/memglass-diff -f json my_app | jq '.changes[]'
+```
+
+See [memglass-diff documentation](memglass-diff.md) for all options and the binary format specification.
+
 ## Next Steps
 
 - Read the [Advanced Guide](advanced.md) for nested structs, synchronization options, and more
