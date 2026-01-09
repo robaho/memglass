@@ -405,43 +405,252 @@ The observer can also write values back to shared memory:
 - **Field reads**: Accept that non-atomic fields may have torn values
 - **Memory mapping**: Lazily map new regions as they appear
 
-### Optional Strong Consistency
+### Atomicity Levels
 
-For fields requiring atomic reads:
+memglass provides multiple levels of consistency for field access:
+
+| Level | Mechanism | Overhead | Use Case |
+|-------|-----------|----------|----------|
+| None | Direct read/write | Zero | Debugging, non-critical data |
+| Atomic | `std::atomic<T>` | Low | Single primitive values |
+| Seqlock | `memglass::Guarded<T>` | Medium | Compound types (structs) |
+| Mutex | `memglass::Locked<T>` | High | Complex operations, RMW |
+
+### Specifying Atomicity via Annotations
+
+Use the `@atomic` annotation to specify consistency requirements:
 
 ```cpp
-struct Player {
-    std::atomic<float> health;  // Observer sees consistent value
-    memglass::Guarded<Vec3> position;  // Seqlock-protected compound value
+struct [[memglass::observe]] Player {
+    uint32_t id;                      // No consistency (default)
+    float health;                     // @atomic - use std::atomic internally
+    Vec3 position;                    // @seqlock - wrap in Guarded<T>
+    char name[32];                    // @locked - mutex-protected
+    uint64_t frame_counter;           // @atomic
 };
 ```
 
-The `Guarded<T>` wrapper uses a seqlock:
+The generator produces appropriate wrappers:
+
+```cpp
+// memglass_generated.hpp
+struct Player_Storage {
+    uint32_t id;                      // Direct storage
+    std::atomic<float> health;        // Atomic wrapper
+    memglass::Guarded<Vec3> position; // Seqlock wrapper
+    memglass::Locked<char[32]> name;  // Mutex wrapper
+    std::atomic<uint64_t> frame_counter;
+};
+```
+
+### Atomic Primitives (`std::atomic<T>`)
+
+For single primitive values that fit in a register:
+
+```cpp
+struct [[memglass::observe]] Counter {
+    uint64_t value;  // @atomic
+};
+
+// Producer
+counter->value.store(42, std::memory_order_release);
+counter->value.fetch_add(1, std::memory_order_relaxed);
+
+// Observer
+uint64_t v = counter_view.read_atomic<uint64_t>("value");
+counter_view.write_atomic<uint64_t>("value", 100);
+```
+
+**Supported atomic types:** `bool`, `int8-64`, `uint8-64`, `float`, `double` (if lock-free on platform)
+
+### Seqlock Wrapper (`Guarded<T>`)
+
+For compound types that must be read/written atomically as a unit:
 
 ```cpp
 template<typename T>
 struct Guarded {
-    std::atomic<uint32_t> seq;
+    static_assert(std::is_trivially_copyable_v<T>);
+
+    mutable std::atomic<uint32_t> seq{0};
     T value;
 
+    // Producer write
     void write(const T& v) {
-        seq.fetch_add(1, std::memory_order_release);
-        value = v;
-        seq.fetch_add(1, std::memory_order_release);
+        seq.fetch_add(1, std::memory_order_release);  // Odd = writing
+        std::memcpy(&value, &v, sizeof(T));
+        std::atomic_thread_fence(std::memory_order_release);
+        seq.fetch_add(1, std::memory_order_release);  // Even = stable
     }
 
+    // Observer read (spins until consistent)
     T read() const {
         T result;
-        uint32_t s;
+        uint32_t s1, s2;
         do {
-            s = seq.load(std::memory_order_acquire);
-            if (s & 1) continue;  // Write in progress
-            result = value;
-        } while (seq.load(std::memory_order_acquire) != s);
+            s1 = seq.load(std::memory_order_acquire);
+            if (s1 & 1) {
+                // Write in progress, spin
+                _mm_pause();  // or std::this_thread::yield()
+                continue;
+            }
+            std::memcpy(&result, &value, sizeof(T));
+            std::atomic_thread_fence(std::memory_order_acquire);
+            s2 = seq.load(std::memory_order_acquire);
+        } while (s1 != s2);
+        return result;
+    }
+
+    // Try read without spinning (returns nullopt if write in progress)
+    std::optional<T> try_read() const {
+        uint32_t s1 = seq.load(std::memory_order_acquire);
+        if (s1 & 1) return std::nullopt;
+
+        T result;
+        std::memcpy(&result, &value, sizeof(T));
+        std::atomic_thread_fence(std::memory_order_acquire);
+
+        uint32_t s2 = seq.load(std::memory_order_acquire);
+        if (s1 != s2) return std::nullopt;
+
         return result;
     }
 };
 ```
+
+**Usage in struct:**
+
+```cpp
+struct [[memglass::observe]] Transform {
+    memglass::Guarded<Vec3> position;   // Or use: // @seqlock
+    memglass::Guarded<Vec3> rotation;
+    memglass::Guarded<Vec3> scale;
+};
+
+// Producer
+transform->position.write({1.0f, 2.0f, 3.0f});
+
+// Observer
+Vec3 pos = transform_view.read_guarded<Vec3>("position");
+transform_view.write_guarded("position", Vec3{4.0f, 5.0f, 6.0f});
+```
+
+### Mutex Wrapper (`Locked<T>`)
+
+For operations requiring read-modify-write or complex updates:
+
+```cpp
+template<typename T>
+struct Locked {
+    static_assert(std::is_trivially_copyable_v<T>);
+
+    mutable std::atomic_flag lock_ = ATOMIC_FLAG_INIT;
+    T value;
+
+    void write(const T& v) {
+        while (lock_.test_and_set(std::memory_order_acquire)) {
+            _mm_pause();
+        }
+        value = v;
+        lock_.clear(std::memory_order_release);
+    }
+
+    T read() const {
+        while (lock_.test_and_set(std::memory_order_acquire)) {
+            _mm_pause();
+        }
+        T result = value;
+        lock_.clear(std::memory_order_release);
+        return result;
+    }
+
+    // Read-modify-write operation
+    template<typename F>
+    void update(F&& func) {
+        while (lock_.test_and_set(std::memory_order_acquire)) {
+            _mm_pause();
+        }
+        func(value);
+        lock_.clear(std::memory_order_release);
+    }
+};
+```
+
+**Usage:**
+
+```cpp
+struct [[memglass::observe]] Stats {
+    memglass::Locked<char[256]> last_error;  // Or use: // @locked
+};
+
+// Producer
+stats->last_error.write("Connection timeout");
+
+// Observer - read-modify-write
+stats_view.update_locked<char[256]>("last_error", [](char* buf) {
+    std::strcat(buf, " (retrying)");
+});
+```
+
+### Observer API for Atomic Access
+
+```cpp
+auto view = observer.find("player_1");
+
+// Detect field atomicity from metadata
+FieldInfo info = view.field_info("health");
+switch (info.atomicity) {
+    case Atomicity::None:
+        float h = view.read<float>("health");  // May tear
+        break;
+    case Atomicity::Atomic:
+        float h = view.read_atomic<float>("health");  // Uses std::atomic
+        break;
+    case Atomicity::Seqlock:
+        Vec3 p = view.read_guarded<Vec3>("position");  // Uses seqlock
+        break;
+    case Atomicity::Locked:
+        auto name = view.read_locked<char[32]>("name");  // Uses mutex
+        break;
+}
+
+// Automatic dispatch based on metadata
+float h = view.read_safe<float>("health");  // Chooses correct method
+view.write_safe("health", 100.0f);          // Chooses correct method
+```
+
+### memglass-view Integration
+
+The viewer automatically uses the correct access method:
+
+```
+┌─ entity_0 : Entity ─────────────────────────┐
+│ id         uint32   42                      │
+│ health     float    87.5         [atomic]   │  ← Shows consistency level
+│ position   Vec3     ▼            [seqlock]  │
+│   x        float    3.141593                │
+│   y        float    0.000000                │
+│   z        float    -2.718282               │
+│ name       char[32] "Player1"    [locked]   │
+└─────────────────────────────────────────────┘
+```
+
+When editing, the viewer uses `write_safe()` to ensure correct synchronization.
+
+### Performance Considerations
+
+| Access Type | Read Latency | Write Latency | Contention Behavior |
+|-------------|--------------|---------------|---------------------|
+| Direct | ~1 ns | ~1 ns | May tear |
+| `std::atomic` | ~5-20 ns | ~5-20 ns | Lock-free |
+| `Guarded<T>` | ~10-50 ns | ~10-30 ns | Reader spins on write |
+| `Locked<T>` | ~20-100 ns | ~20-100 ns | Exclusive access |
+
+**Guidelines:**
+- Use `@atomic` for frequently-updated scalars (counters, flags, health)
+- Use `@seqlock` for compound values read often, written rarely (position, orientation)
+- Use `@locked` for strings or values needing RMW operations
+- Default (none) for debugging data or where tearing is acceptable
 
 ## Region Management
 
@@ -635,6 +844,9 @@ struct [[memglass::observe]] Player {
 | `@format(fmt)` | printf-style display format | `// @format("%.2f")` |
 | `@unit(str)` | Display unit suffix | `// @unit("m/s")` |
 | `@desc(str)` | Description tooltip | `// @desc("Player health points")` |
+| `@atomic` | Use `std::atomic<T>` for field | `// @atomic` |
+| `@seqlock` | Use `Guarded<T>` seqlock wrapper | `// @seqlock` |
+| `@locked` | Use `Locked<T>` mutex wrapper | `// @locked` |
 
 **Generated Metadata:**
 
