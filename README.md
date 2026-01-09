@@ -6,6 +6,10 @@
 
 Real-time cross-process observation of C++ POD objects via shared memory.
 
+<p align="center">
+  <img src="demo.gif" alt="memglass TUI demo">
+</p>
+
 ## What it does
 
 A producer application allocates POD structs in shared memory with automatic field registration. An observer process maps the same memory to inspect live object state - no serialization, no IPC overhead, just direct memory reads.
