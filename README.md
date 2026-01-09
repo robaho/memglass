@@ -158,6 +158,13 @@ struct Data {
 - Use `char name[N]` for strings, `std::array<T,N>` for fixed arrays
 - Nested structs are supported and flattened with dot notation
 
+## Documentation
+
+- [Quick Start Guide](docs/quickstart.md) - Get up and running in 5 minutes
+- [Advanced Guide](docs/advanced.md) - Nested structs, synchronization, annotations
+- [Architecture](docs/architecture.md) - Internal design and memory layout
+- [API Reference](docs/api-reference.md) - Complete API documentation
+
 ## Project Structure
 
 ```
@@ -171,6 +178,7 @@ struct Data {
 │   ├── memglass.cpp      # Interactive TUI observer
 │   └── memglass-gen/     # Code generator
 ├── examples/             # Trading example
+├── docs/                 # Documentation
 └── tests/                # Unit tests
 ```
 
