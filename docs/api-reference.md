@@ -559,3 +559,151 @@ struct [[memglass::observe]] Data {
     int32_t debug;       // (no annotation)
 };
 ```
+
+---
+
+## Web API Reference
+
+The memglass CLI tool can run as an HTTP server, exposing a JSON API for remote observation.
+
+### Starting the Web Server
+
+```bash
+# Default port 8080
+memglass --web my_session
+
+# Custom port
+memglass --web 9000 my_session
+```
+
+### Endpoints
+
+#### `GET /`
+
+Returns the embedded HTML/JavaScript browser interface.
+
+**Content-Type:** `text/html`
+
+---
+
+#### `GET /api/data`
+
+Returns a JSON snapshot of the current session state.
+
+**Content-Type:** `application/json`
+
+**Response Schema:**
+
+```json
+{
+  "pid": <number>,
+  "sequence": <number>,
+  "types": [<TypeInfo>, ...],
+  "objects": [<ObjectInfo>, ...]
+}
+```
+
+**TypeInfo:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Type name |
+| `type_id` | number | Unique type identifier |
+| `size` | number | Size in bytes |
+| `field_count` | number | Number of fields |
+
+**ObjectInfo:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `label` | string | Object label/name |
+| `type_name` | string | Type name |
+| `type_id` | number | Type identifier |
+| `fields` | array | List of FieldValue objects |
+
+**FieldValue:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Field name (dot-notation for nested) |
+| `value` | any | Current field value |
+| `atomicity` | string | One of: `"none"`, `"atomic"`, `"seqlock"`, `"locked"` |
+
+**Example Response:**
+
+```json
+{
+  "pid": 12345,
+  "sequence": 42,
+  "types": [
+    {
+      "name": "Counter",
+      "type_id": 65537,
+      "size": 16,
+      "field_count": 2
+    }
+  ],
+  "objects": [
+    {
+      "label": "main_counter",
+      "type_name": "Counter",
+      "type_id": 65537,
+      "fields": [
+        {
+          "name": "value",
+          "value": 123456,
+          "atomicity": "atomic"
+        },
+        {
+          "name": "timestamp",
+          "value": 1704825432123456789,
+          "atomicity": "none"
+        }
+      ]
+    }
+  ]
+}
+```
+
+---
+
+### Value Representation
+
+| C++ Type | JSON Type | Notes |
+|----------|-----------|-------|
+| `bool` | `true`/`false` | |
+| `int8_t`, `int16_t`, `int32_t`, `int64_t` | number | |
+| `uint8_t`, `uint16_t`, `uint32_t`, `uint64_t` | number | |
+| `float`, `double` | number | NaN/Inf represented as strings |
+| `char` | string | Single character |
+| Nested struct fields | - | Flattened with dot notation |
+
+**Special Float Values:**
+
+- `NaN` → `"NaN"`
+- `+Infinity` → `"Infinity"`
+- `-Infinity` → `"-Infinity"`
+
+---
+
+### Error Handling
+
+If the producer disconnects, the API will return the last known state. Check the `pid` and `sequence` fields to detect staleness.
+
+---
+
+### CORS
+
+The web server does not set CORS headers by default. For cross-origin access, run behind a reverse proxy that adds appropriate headers.
+
+---
+
+### Remote Access
+
+For secure remote access, use SSH port forwarding:
+
+```bash
+ssh -L 8080:localhost:8080 user@remote-server
+```
+
+See the [Quick Start Guide](quickstart.md#remote-access-via-ssh-tunnel) for more options.

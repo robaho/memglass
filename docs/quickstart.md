@@ -168,6 +168,34 @@ You can also specify a custom port:
 ./build/memglass --web 9000 my_app
 ```
 
+### Remote Access via SSH Tunnel
+
+To access the web UI from a remote server (e.g., colocation), use SSH port forwarding:
+
+```bash
+# Forward remote port 8080 to local port 8080
+ssh -L 8080:localhost:8080 user@remote-server
+
+# Then open http://localhost:8080 in your local browser
+```
+
+For background tunneling (no interactive shell):
+
+```bash
+ssh -fNL 8080:localhost:8080 user@remote-server
+```
+
+Or add to your `~/.ssh/config`:
+
+```
+Host myserver-memglass
+    HostName remote-server
+    User your-user
+    LocalForward 8080 localhost:8080
+```
+
+Then just: `ssh myserver-memglass`
+
 ## Step 6: Write a Custom Observer (Optional)
 
 For programmatic access:
@@ -200,8 +228,31 @@ int main() {
 }
 ```
 
+## Step 7: Use the Python Client (Optional)
+
+For quick scripts or integration with Python tools:
+
+```python
+from memglass import MemglassClient
+
+client = MemglassClient("http://localhost:8080")
+snapshot = client.fetch()
+
+counter = snapshot.get_object("main_counter")
+if counter:
+    print(f"Counter: {counter['value']}")
+
+# Continuous monitoring
+for snapshot in client.stream(interval=0.5):
+    counter = snapshot.get_object("main_counter")
+    print(f"Value: {counter['value']}")
+```
+
+See [clients/python/README.md](../clients/python/README.md) for full documentation.
+
 ## Next Steps
 
 - Read the [Advanced Guide](advanced.md) for nested structs, synchronization options, and more
 - See the [API Reference](api-reference.md) for complete documentation
+- See the [Python Client](../clients/python/README.md) for scripting and automation
 - Check the [Architecture](architecture.md) for understanding the internals

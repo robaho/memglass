@@ -140,7 +140,22 @@ The web interface provides the same tree view with:
 - Atomicity badges (atomic, seqlock, locked)
 - Dark theme optimized for monitoring
 
-### 6. Or write a custom observer
+### 6. Or use the Python client
+
+```python
+from memglass import MemglassClient
+
+client = MemglassClient("http://localhost:8080")
+
+for snapshot in client.stream(interval=0.5):
+    aapl = snapshot.get_object("AAPL")
+    if aapl:
+        print(f"AAPL bid: {aapl['quote.bid_price']}")
+```
+
+See [clients/python/](clients/python/) for full documentation.
+
+### 7. Or write a custom C++ observer
 
 ```cpp
 #include <memglass/observer.hpp>
@@ -188,7 +203,8 @@ struct Data {
 - [Quick Start Guide](docs/quickstart.md) - Get up and running in 5 minutes
 - [Advanced Guide](docs/advanced.md) - Nested structs, synchronization, annotations
 - [Architecture](docs/architecture.md) - Internal design and memory layout
-- [API Reference](docs/api-reference.md) - Complete API documentation
+- [API Reference](docs/api-reference.md) - Complete API documentation (includes Web API)
+- [Python Client](clients/python/README.md) - Python client for scripting and automation
 
 ## Project Structure
 
@@ -202,6 +218,8 @@ struct Data {
 ├── tools/
 │   ├── memglass.cpp      # TUI and Web observer (--web flag)
 │   └── memglass-gen/     # Code generator
+├── clients/
+│   └── python/           # Python client for Web API
 ├── examples/             # Trading example
 ├── docs/                 # Documentation
 └── tests/                # Unit tests
