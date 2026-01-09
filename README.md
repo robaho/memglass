@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.jpg" width="400" alt="memglass logo">
+</p>
+
 # memglass
 
 Real-time cross-process observation of C++ POD objects via shared memory.
