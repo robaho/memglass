@@ -70,6 +70,10 @@ if(MEMGLASS_BUILD_WEB)
 endif()
 set_target_properties(memglass-cli PROPERTIES OUTPUT_NAME memglass)
 
+# memglass-diff tool (snapshot diff recorder)
+add_executable(memglass-diff tools/memglass-diff.cpp)
+target_link_libraries(memglass-diff PRIVATE memglass)
+
 # memglass-gen tool
 if(MEMGLASS_BUILD_GENERATOR)
     find_package(Clang QUIET)

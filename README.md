@@ -155,7 +155,22 @@ for snapshot in client.stream(interval=0.5):
 
 See [clients/python/](clients/python/) for full documentation.
 
-### 7. Or write a custom C++ observer
+### 7. Record and analyze diffs
+
+```bash
+# Record changes every 100ms to a binary file
+./build/memglass-diff -i 100 -f binary -o changes.mgd trading_engine
+
+# Or stream text diffs to stdout
+./build/memglass-diff -i 500 trading_engine
+
+# Decode binary file to text
+./build/memglass-diff --decode changes.mgd
+```
+
+See [docs/memglass-diff.md](docs/memglass-diff.md) for format details.
+
+### 8. Or write a custom C++ observer
 
 ```cpp
 #include <memglass/observer.hpp>
@@ -204,6 +219,7 @@ struct Data {
 - [Advanced Guide](docs/advanced.md) - Nested structs, synchronization, annotations
 - [Architecture](docs/architecture.md) - Internal design and memory layout
 - [API Reference](docs/api-reference.md) - Complete API documentation (includes Web API)
+- [Diff Tool](docs/memglass-diff.md) - Snapshot diff recorder and binary format
 - [Python Client](clients/python/README.md) - Python client for scripting and automation
 
 ## Project Structure
@@ -217,6 +233,7 @@ struct Data {
 ├── src/                  # Library implementation
 ├── tools/
 │   ├── memglass.cpp      # TUI and Web observer (--web flag)
+│   ├── memglass-diff.cpp # Snapshot diff recorder
 │   └── memglass-gen/     # Code generator
 ├── clients/
 │   └── python/           # Python client for Web API
