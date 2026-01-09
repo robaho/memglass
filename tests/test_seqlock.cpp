@@ -1,8 +1,8 @@
+#include <atomic>
+#include <chrono>
 #include <gtest/gtest.h>
 #include <memglass/detail/seqlock.hpp>
 #include <thread>
-#include <atomic>
-#include <chrono>
 
 using namespace memglass;
 
@@ -15,8 +15,10 @@ struct TestData {
 
 class SeqlockTest : public ::testing::Test {
 protected:
-    void SetUp() override {}
-    void TearDown() override {}
+    void SetUp() override {
+    }
+    void TearDown() override {
+    }
 };
 
 TEST_F(SeqlockTest, GuardedBasicReadWrite) {
@@ -59,13 +61,8 @@ TEST_F(SeqlockTest, GuardedTryRead) {
     EXPECT_EQ(result->b, 20);
 }
 
-// NOTE: Concurrent seqlock testing is disabled.
-// The seqlock implementation works correctly for the intended use case (single writer
-// updating infrequently, observers reading at their own pace), but the stress test
-// exposes edge cases in the C++ memory model that require platform-specific solutions.
-// For cross-process shared memory (the primary use case), the OS page faults provide
-// implicit synchronization that makes the seqlock work correctly.
-TEST_F(SeqlockTest, DISABLED_GuardedConcurrentAccess) {
+// Concurrent stress test
+TEST_F(SeqlockTest, GuardedConcurrentAccess) {
     struct alignas(16) SimpleData {
         int64_t a;
         int64_t b;
@@ -75,10 +72,11 @@ TEST_F(SeqlockTest, DISABLED_GuardedConcurrentAccess) {
     std::atomic<bool> stop{false};
     std::atomic<int> read_count{0};
     std::atomic<int> write_count{0};
+    std::atomic<int> inconsistencies{0};
 
     // Writer thread
     std::thread writer([&]() {
-        for (int64_t i = 0; i < 1000 && !stop; ++i) {
+        for (int64_t i = 0; i < 100000 && !stop; ++i) {
             SimpleData data{i, i};
             guarded.write(data);
             write_count++;
@@ -87,9 +85,11 @@ TEST_F(SeqlockTest, DISABLED_GuardedConcurrentAccess) {
 
     // Reader thread
     std::thread reader([&]() {
-        while (!stop && write_count < 1000) {
+        while (!stop && write_count < 100000) {
             SimpleData result = guarded.read();
-            EXPECT_EQ(result.a, result.b);
+            if (result.a != result.b) {
+                inconsistencies++;
+            }
             read_count++;
         }
     });
@@ -98,14 +98,17 @@ TEST_F(SeqlockTest, DISABLED_GuardedConcurrentAccess) {
     stop = true;
     reader.join();
 
-    EXPECT_EQ(write_count, 1000);
+    EXPECT_EQ(write_count, 100000);
     EXPECT_GT(read_count, 0);
+    EXPECT_EQ(inconsistencies, 0) << "Found " << inconsistencies << " torn reads!";
 }
 
 class LockedTest : public ::testing::Test {
 protected:
-    void SetUp() override {}
-    void TearDown() override {}
+    void SetUp() override {
+    }
+    void TearDown() override {
+    }
 };
 
 TEST_F(LockedTest, BasicReadWrite) {
@@ -127,7 +130,7 @@ TEST_F(LockedTest, UpdateFunction) {
     TestData initial{1, 2, 3, 4.0};
     locked.write(initial);
 
-    locked.update([](TestData& d) {
+    locked.update([](TestData &d) {
         d.a *= 10;
         d.b *= 10;
         d.c *= 10;
@@ -152,12 +155,12 @@ TEST_F(LockedTest, ConcurrentAccess) {
     for (int t = 0; t < num_threads; ++t) {
         threads.emplace_back([&]() {
             for (int i = 0; i < increments_per_thread; ++i) {
-                counter.update([](int64_t& c) { c++; });
+                counter.update([](int64_t &c) { c++; });
             }
         });
     }
 
-    for (auto& t : threads) {
+    for (auto &t : threads) {
         t.join();
     }
 
@@ -185,8 +188,7 @@ TEST_F(LockedTest, ConcurrentReadersWriters) {
             for (int i = 0; i < 500 && !stop; ++i) {
                 TestData result = locked.read();
                 // All fields should have consistent values
-                if (result.a != result.b ||
-                    static_cast<int64_t>(result.a) != result.c) {
+                if (result.a != result.b || static_cast<int64_t>(result.a) != result.c) {
                     inconsistencies++;
                 }
             }
@@ -195,7 +197,7 @@ TEST_F(LockedTest, ConcurrentReadersWriters) {
 
     writer.join();
     stop = true;
-    for (auto& t : readers) {
+    for (auto &t : readers) {
         t.join();
     }
 

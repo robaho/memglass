@@ -14,103 +14,83 @@
 
 namespace memglass {
 
-// Compiler barrier to prevent reordering
-#if defined(__GNUC__) || defined(__clang__)
-#define MEMGLASS_COMPILER_BARRIER() asm volatile("" ::: "memory")
-#else
-#define MEMGLASS_COMPILER_BARRIER() std::atomic_signal_fence(std::memory_order_seq_cst)
-#endif
-
-// Seqlock-protected value for consistent reads of compound types
-// This implementation uses a classic seqlock pattern with proper memory barriers
-template<typename T>
+// Seqlock-protected value for consistent reads of compound types.
+// Uses atomic_signal_fence for compiler barrier combined with release/acquire
+// semantics on sequence counter for CPU barriers.
+//
+// Key insight: atomic_signal_fence prevents compiler reordering, while the
+// release/acquire on seq_ provides the necessary CPU memory ordering.
+// Direct assignment (not memcpy) allows the compiler to optimize the copy.
+template <typename T>
 struct Guarded {
-    static_assert(std::is_trivially_copyable_v<T>, "Guarded<T> requires trivially copyable T");
+    static_assert(std::is_nothrow_copy_assignable_v<T>,
+                  "Guarded<T> requires nothrow copy assignable T");
+    static_assert(std::is_trivially_copy_assignable_v<T>,
+                  "Guarded<T> requires trivially copy assignable T");
 
-    std::atomic<uint32_t> seq_{0};
-    T value_{};
-
-    Guarded() = default;
-    explicit Guarded(const T& v) : value_(v) {}
-
-    // Producer write - classic seqlock write
-    void write(const T& v) {
-        // Increment to odd (write in progress)
-        uint32_t s = seq_.load(std::memory_order_relaxed);
-        seq_.store(s + 1, std::memory_order_relaxed);
-        MEMGLASS_COMPILER_BARRIER();
-
-        // Copy the data
-        value_ = v;
-
-        // Compiler barrier + store release to make data visible
-        MEMGLASS_COMPILER_BARRIER();
-        seq_.store(s + 2, std::memory_order_release);
+    Guarded() : seq_(0) {
+    }
+    explicit Guarded(const T &v) : seq_(0), value_(v) {
     }
 
-    // Observer read (spins until consistent)
-    T read() const {
-        T result;
-        uint32_t s1, s2;
+    // Producer write - single writer assumed
+    void write(const T &v) noexcept {
+        std::size_t s = seq_.load(std::memory_order_relaxed);
+        seq_.store(s + 1, std::memory_order_release);  // Odd = write in progress
+        std::atomic_signal_fence(std::memory_order_acq_rel);
+        value_ = v;
+        std::atomic_signal_fence(std::memory_order_acq_rel);
+        seq_.store(s + 2, std::memory_order_release);  // Even = write complete
+    }
+
+    // Observer read - spins until consistent read obtained
+    T read() const noexcept {
+        T copy;
+        std::size_t s1, s2;
         do {
-            // Load sequence with acquire semantics
             s1 = seq_.load(std::memory_order_acquire);
-
-            // If odd, write in progress - spin
-            if (s1 & 1) {
-                MEMGLASS_PAUSE();
-                continue;
-            }
-
-            // Full memory fence to ensure all subsequent loads happen after s1
-            std::atomic_thread_fence(std::memory_order_seq_cst);
-
-            // Copy the data using memcpy to ensure proper ordering
-            std::memcpy(&result, const_cast<const T*>(&value_), sizeof(T));
-
-            // Full memory fence to ensure all prior loads complete before s2
-            std::atomic_thread_fence(std::memory_order_seq_cst);
-
-            // Re-load sequence to check consistency
+            std::atomic_signal_fence(std::memory_order_acq_rel);
+            copy = value_;
+            std::atomic_signal_fence(std::memory_order_acq_rel);
             s2 = seq_.load(std::memory_order_acquire);
-
-            // If sequence changed, we may have read torn data - retry
-        } while (s1 != s2);
-
-        return result;
+        } while (s1 != s2 || s1 & 1);
+        return copy;
     }
 
     // Try read without spinning (returns nullopt if write in progress or torn)
-    std::optional<T> try_read() const {
-        uint32_t s1 = seq_.load(std::memory_order_acquire);
+    std::optional<T> try_read() const noexcept {
+        std::size_t s1 = seq_.load(std::memory_order_acquire);
         if (s1 & 1) return std::nullopt;
 
-        std::atomic_thread_fence(std::memory_order_seq_cst);
+        std::atomic_signal_fence(std::memory_order_acq_rel);
+        T copy = value_;
+        std::atomic_signal_fence(std::memory_order_acq_rel);
 
-        T result;
-        std::memcpy(&result, const_cast<const T*>(&value_), sizeof(T));
-
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-
-        uint32_t s2 = seq_.load(std::memory_order_acquire);
+        std::size_t s2 = seq_.load(std::memory_order_acquire);
         if (s1 != s2) return std::nullopt;
 
-        return result;
+        return copy;
     }
+
+private:
+    T value_{};
+    std::atomic<std::size_t> seq_;
 };
 
 // Spinlock-protected value for exclusive access
-template<typename T>
+template <typename T>
 struct Locked {
-    static_assert(std::is_trivially_copyable_v<T>, "Locked<T> requires trivially copyable T");
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "Locked<T> requires trivially copyable T");
 
     mutable std::atomic_flag lock_ = ATOMIC_FLAG_INIT;
     T value{};
 
     Locked() = default;
-    explicit Locked(const T& v) : value(v) {}
+    explicit Locked(const T &v) : value(v) {
+    }
 
-    void write(const T& v) {
+    void write(const T &v) {
         while (lock_.test_and_set(std::memory_order_acquire)) {
             MEMGLASS_PAUSE();
         }
@@ -129,8 +109,8 @@ struct Locked {
     }
 
     // Read-modify-write operation
-    template<typename F>
-    void update(F&& func) {
+    template <typename F>
+    void update(F &&func) {
         while (lock_.test_and_set(std::memory_order_acquire)) {
             MEMGLASS_PAUSE();
         }
@@ -139,4 +119,4 @@ struct Locked {
     }
 };
 
-} // namespace memglass
+}  // namespace memglass
