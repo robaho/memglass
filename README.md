@@ -45,17 +45,18 @@ make
 // trading_types.hpp
 #include <cstdint>
 
+// Annotations: @atomic for primitives, @seqlock for compound Guarded<T> fields
 struct [[memglass::observe]] Quote {
-    int64_t bid_price;   // @seqlock
-    int64_t ask_price;
-    uint32_t bid_size;
-    uint32_t ask_size;
-    uint64_t timestamp_ns;
+    int64_t bid_price;      // @atomic
+    int64_t ask_price;      // @atomic
+    uint32_t bid_size;      // @atomic
+    uint32_t ask_size;      // @atomic
+    uint64_t timestamp_ns;  // @atomic
 };
 
 struct [[memglass::observe]] Position {
     uint32_t symbol_id;
-    int64_t quantity;    // @atomic
+    int64_t quantity;       // @atomic
     int64_t avg_price;
     int64_t realized_pnl;
     int64_t unrealized_pnl;
@@ -73,6 +74,11 @@ struct [[memglass::observe]] Security {
 ./build/memglass-gen trading_types.hpp -o trading_types_generated.hpp
 ```
 
+This generates:
+- **Type registration functions** for runtime reflection
+- **Producer wrapper classes** (`QuoteProducer`, `PositionProducer`) that enforce synchronization
+- **`make_producer()` helpers** for creating wrappers
+
 ### 3. Create a producer
 
 ```cpp
@@ -85,17 +91,24 @@ int main() {
     memglass::generated::register_all_types();
 
     auto* aapl = memglass::create<Security>("AAPL");
-    aapl->quote.bid_price = 15000;
-    aapl->position.quantity = 100;
+
+    // Use generated producer wrappers for synchronized writes
+    auto quote_prod = memglass::generated::make_producer(&aapl->quote);
+    auto pos_prod = memglass::generated::make_producer(&aapl->position);
+
+    quote_prod.set_bid_price(15000);
+    pos_prod.set_quantity(100);
 
     while (running) {
-        aapl->quote.bid_price += random_delta();
-        aapl->quote.timestamp_ns = now();
+        quote_prod.set_bid_price(quote_prod.get_bid_price() + random_delta());
+        quote_prod.set_timestamp_ns(now());
     }
 
     memglass::shutdown();
 }
 ```
+
+The producer wrappers use `std::atomic_ref` for `@atomic` fields, ensuring observers on other CPU cores see consistent values without torn reads.
 
 ### 4. Observe with the TUI
 
@@ -111,11 +124,11 @@ PID: 12345  Objects: 5  Seq: 5
 --------------------------------------------------------------------------------
 [-] AAPL (Security)
   [-] quote
-        bid_price        =          15023 [seqlock]
-        ask_price        =          15028
-        bid_size         =            142
-        ask_size         =            98
-        timestamp_ns     = 1704825432123456789
+        bid_price        =          15023 [atomic]
+        ask_price        =          15028 [atomic]
+        bid_size         =            142 [atomic]
+        ask_size         =             98 [atomic]
+        timestamp_ns     = 1704825432123456789 [atomic]
   [+] position
 [+] MSFT (Security)
 [+] GOOG (Security)
@@ -195,16 +208,25 @@ int main() {
 
 ## Field Annotations
 
-Use comments to specify synchronization:
+Use comments to specify synchronization semantics. The code generator creates producer wrappers that enforce these:
 
 ```cpp
 struct Data {
-    int64_t counter;      // @atomic - std::atomic reads/writes
-    double price;         // @seqlock - seqlock protection for larger types
-    int32_t flags;        // @locked - mutex protection (rare)
+    int64_t counter;      // @atomic - uses std::atomic_ref for primitives
+    Guarded<Compound> cmp;// @seqlock - for compound types needing atomic update
+    Locked<Buffer> buf;   // @locked - spinlock for complex operations
     int32_t simple;       // (no annotation) - direct read/write
 };
 ```
+
+| Annotation | Use Case | Producer Wrapper |
+|------------|----------|------------------|
+| `@atomic` | Primitive values (int64_t, double, etc.) | `std::atomic_ref<T>` |
+| `@seqlock` | Compound structs updated atomically | `Guarded<T>::write()` |
+| `@locked` | Read-modify-write, strings | `Locked<T>::write()` |
+| (none) | Non-critical, debug data | Direct assignment |
+
+**Important:** Use `@atomic` for primitive fields. Use `@seqlock` only for compound struct fields declared as `Guarded<T>`.
 
 ## Constraints
 
