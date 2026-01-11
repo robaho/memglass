@@ -38,20 +38,26 @@ Create a header with POD structs marked for observation:
 #pragma once
 #include <cstdint>
 
+// Annotation guide:
+//   @atomic   - For primitive fields needing atomic access (int64_t, etc.)
+//   @seqlock  - For compound structs where producer uses Guarded<T>
+//   @locked   - For fields where producer uses Locked<T> spinlock
+//   @readonly - Field is never modified after initialization
+
 struct [[memglass::observe]] Counter {
     uint64_t value;      // @atomic
-    uint64_t timestamp;
+    uint64_t timestamp;  // @atomic
 };
 
 struct [[memglass::observe]] Stats {
-    int64_t min_value;
-    int64_t max_value;
-    double average;
-    uint32_t count;
+    int64_t min_value;   // @atomic
+    int64_t max_value;   // @atomic
+    double average;      // @atomic
+    uint32_t count;      // @atomic
 };
 ```
 
-The `[[memglass::observe]]` attribute marks types for automatic reflection. Comments like `// @atomic` specify synchronization behavior.
+The `[[memglass::observe]]` attribute marks types for automatic reflection. Comments like `// @atomic` specify synchronization behavior - the code generator creates producer wrapper classes that enforce these semantics.
 
 ## Step 2: Generate Registration Code
 
@@ -61,7 +67,10 @@ Run the code generator on your header:
 ./build/memglass-gen my_types.hpp -o my_types_generated.hpp
 ```
 
-This creates type registration functions that memglass uses at runtime.
+This creates:
+1. **Type registration functions** - used at runtime for reflection
+2. **Producer wrapper classes** - enforce synchronization based on annotations (e.g., `CounterProducer`, `StatsProducer`)
+3. **`make_producer()` helpers** - create wrappers from raw pointers
 
 ## Step 3: Write a Producer
 
@@ -85,26 +94,34 @@ int main() {
     auto* counter = memglass::create<Counter>("main_counter");
     auto* stats = memglass::create<Stats>("global_stats");
 
-    // Initialize
-    counter->value = 0;
-    counter->timestamp = 0;
-    stats->min_value = INT64_MAX;
-    stats->max_value = INT64_MIN;
-    stats->average = 0.0;
-    stats->count = 0;
+    // Create producer wrappers for synchronized access
+    // These enforce the @atomic annotations via std::atomic_ref
+    auto counter_prod = memglass::generated::make_producer(counter);
+    auto stats_prod = memglass::generated::make_producer(stats);
 
-    // Update loop
+    // Initialize using synchronized setters
+    counter_prod.set_value(0);
+    counter_prod.set_timestamp(0);
+    stats_prod.set_min_value(INT64_MAX);
+    stats_prod.set_max_value(INT64_MIN);
+    stats_prod.set_average(0.0);
+    stats_prod.set_count(0);
+
+    // Update loop - always use producer wrappers for synchronized writes
     while (true) {
-        counter->value++;
-        counter->timestamp = std::chrono::steady_clock::now()
-            .time_since_epoch().count();
+        uint64_t val = counter_prod.get_value() + 1;
+        counter_prod.set_value(val);
+        counter_prod.set_timestamp(std::chrono::steady_clock::now()
+            .time_since_epoch().count());
 
         // Update stats
-        int64_t v = counter->value % 1000;
-        if (v < stats->min_value) stats->min_value = v;
-        if (v > stats->max_value) stats->max_value = v;
-        stats->count++;
-        stats->average = (stats->average * (stats->count - 1) + v) / stats->count;
+        int64_t v = val % 1000;
+        if (v < stats_prod.get_min_value()) stats_prod.set_min_value(v);
+        if (v > stats_prod.get_max_value()) stats_prod.set_max_value(v);
+        uint32_t cnt = stats_prod.get_count() + 1;
+        stats_prod.set_count(cnt);
+        double avg = stats_prod.get_average();
+        stats_prod.set_average((avg * (cnt - 1) + v) / cnt);
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -113,6 +130,8 @@ int main() {
     return 0;
 }
 ```
+
+**Why use producer wrappers?** The annotations (`@atomic`, `@seqlock`, etc.) tell the observer how to read fields safely. But the producer must also write them safely. The generated `*Producer` classes enforce this - `@atomic` fields use `std::atomic_ref` with proper memory ordering, ensuring observers on other CPU cores see consistent values.
 
 ## Step 4: Observe with the TUI
 

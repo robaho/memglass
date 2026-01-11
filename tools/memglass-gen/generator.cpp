@@ -356,9 +356,100 @@ std::string Generator::generate_header() const {
     out << "#pragma once\n\n";
     out << "#include <memglass/memglass.hpp>\n";
     out << "#include <memglass/registry.hpp>\n";
+    out << "#include <memglass/detail/seqlock.hpp>\n";
     out << "#include <array>\n";
+    out << "#include <atomic>\n";
     out << "#include <cstddef>\n\n";
     out << "namespace memglass::generated {\n\n";
+
+    // Generate Producer<T> wrapper types for synchronized access
+    for (const auto& type : types_) {
+        bool needs_wrapper = false;
+        for (const auto& field : type.fields) {
+            if (field.meta.atomicity != FieldMeta::Atomicity::None) {
+                needs_wrapper = true;
+                break;
+            }
+        }
+
+        if (needs_wrapper) {
+            out << fmt::format("// Producer wrapper for {} - enforces synchronization on writes\n", type.name);
+            out << fmt::format("class {}Producer {{\n", type.name);
+            out << "public:\n";
+            out << fmt::format("    explicit {}Producer({}* ptr) : ptr_(ptr) {{}}\n\n", type.name, type.name);
+
+            // Generate setters for each field
+            for (const auto& field : type.fields) {
+                if (field.meta.readonly) {
+                    continue;  // Skip readonly fields
+                }
+
+                if (field.is_array) {
+                    continue;  // Skip arrays for now
+                }
+
+                std::string param_type = field.type_name;
+                if (field.is_nested) {
+                    param_type = field.nested_type_name;
+                }
+
+                switch (field.meta.atomicity) {
+                    case FieldMeta::Atomicity::Atomic:
+                        out << fmt::format("    void set_{}({} value) noexcept {{\n", field.name, param_type);
+                        out << fmt::format("        std::atomic_ref<{}>{{ptr_->{}}}.store(value, std::memory_order_release);\n",
+                                          param_type, field.name);
+                        out << "    }\n";
+                        out << fmt::format("    {} get_{}() const noexcept {{\n", param_type, field.name);
+                        out << fmt::format("        return std::atomic_ref<{}>{{ptr_->{}}}.load(std::memory_order_acquire);\n",
+                                          param_type, field.name);
+                        out << "    }\n\n";
+                        break;
+
+                    case FieldMeta::Atomicity::Seqlock:
+                        // For seqlock, the field must be Guarded<T> in the struct
+                        out << fmt::format("    // Note: {} must be declared as Guarded<{}> in the struct\n",
+                                          field.name, param_type);
+                        out << fmt::format("    void set_{}(const {}& value) noexcept {{\n", field.name, param_type);
+                        out << fmt::format("        reinterpret_cast<memglass::Guarded<{}>*>(&ptr_->{})->write(value);\n",
+                                          param_type, field.name);
+                        out << "    }\n";
+                        out << fmt::format("    {} get_{}() const noexcept {{\n", param_type, field.name);
+                        out << fmt::format("        return reinterpret_cast<const memglass::Guarded<{}>*>(&ptr_->{})->read();\n",
+                                          param_type, field.name);
+                        out << "    }\n\n";
+                        break;
+
+                    case FieldMeta::Atomicity::Locked:
+                        out << fmt::format("    // Note: {} must be declared as Locked<{}> in the struct\n",
+                                          field.name, param_type);
+                        out << fmt::format("    void set_{}(const {}& value) noexcept {{\n", field.name, param_type);
+                        out << fmt::format("        reinterpret_cast<memglass::Locked<{}>*>(&ptr_->{})->write(value);\n",
+                                          param_type, field.name);
+                        out << "    }\n";
+                        out << fmt::format("    {} get_{}() const noexcept {{\n", param_type, field.name);
+                        out << fmt::format("        return reinterpret_cast<const memglass::Locked<{}>*>(&ptr_->{})->read();\n",
+                                          param_type, field.name);
+                        out << "    }\n\n";
+                        break;
+
+                    default:
+                        // No synchronization - direct access
+                        out << fmt::format("    void set_{}({} value) noexcept {{ ptr_->{} = value; }}\n",
+                                          field.name, param_type, field.name);
+                        out << fmt::format("    {} get_{}() const noexcept {{ return ptr_->{}; }}\n\n",
+                                          param_type, field.name, field.name);
+                        break;
+                }
+            }
+
+            out << fmt::format("    {}* raw() {{ return ptr_; }}\n", type.name);
+            out << fmt::format("    const {}* raw() const {{ return ptr_; }}\n\n", type.name);
+            out << "private:\n";
+            out << fmt::format("    {}* ptr_;\n", type.name);
+            out << "};\n\n";
+        }
+    }
+
 
     // Generate TypeDescriptor specializations
     for (const auto& type : types_) {
@@ -417,6 +508,23 @@ std::string Generator::generate_header() const {
         out << fmt::format("    register_{}();\n", type.name);
     }
     out << "}\n\n";
+
+    // Generate make_producer helper functions
+    for (const auto& type : types_) {
+        bool needs_wrapper = false;
+        for (const auto& field : type.fields) {
+            if (field.meta.atomicity != FieldMeta::Atomicity::None) {
+                needs_wrapper = true;
+                break;
+            }
+        }
+
+        if (needs_wrapper) {
+            out << fmt::format("inline {}Producer make_producer({}* ptr) {{\n", type.name, type.name);
+            out << fmt::format("    return {}Producer(ptr);\n", type.name);
+            out << "}\n\n";
+        }
+    }
 
     out << "} // namespace memglass::generated\n";
 

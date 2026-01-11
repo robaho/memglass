@@ -1,4 +1,5 @@
 // Example producer - trading engine simulation
+// Demonstrates using generated Producer wrappers for synchronized writes
 #include <memglass/memglass.hpp>
 #include "trading_types.hpp"
 #include "trading_types_generated.hpp"
@@ -39,7 +40,11 @@ int main() {
 
     // Create securities for tracked symbols
     const char* symbols[] = {"AAPL", "MSFT", "GOOG", "AMZN", "META"};
+
+    // Store raw pointers for cleanup, and producer wrappers for synchronized access
     std::vector<Security*> securities;
+    std::vector<memglass::generated::QuoteProducer> quote_producers;
+    std::vector<memglass::generated::PositionProducer> position_producers;
 
     for (size_t i = 0; i < 5; ++i) {
         auto* sec = memglass::create<Security>(symbols[i]);
@@ -48,21 +53,28 @@ int main() {
             continue;
         }
 
-        // Initialize quote
-        sec->quote.bid_price = 15000 + static_cast<int64_t>(i) * 1000;
-        sec->quote.ask_price = sec->quote.bid_price + 5;
-        sec->quote.bid_size = 100;
-        sec->quote.ask_size = 100;
-        sec->quote.timestamp_ns = 0;
+        // Create producer wrappers for synchronized access
+        auto quote_prod = memglass::generated::make_producer(&sec->quote);
+        auto pos_prod = memglass::generated::make_producer(&sec->position);
 
-        // Initialize position
+        // Initialize quote using producer wrapper (atomic writes)
+        int64_t base_price = 15000 + static_cast<int64_t>(i) * 1000;
+        quote_prod.set_bid_price(base_price);
+        quote_prod.set_ask_price(base_price + 5);
+        quote_prod.set_bid_size(100);
+        quote_prod.set_ask_size(100);
+        quote_prod.set_timestamp_ns(0);
+
+        // Initialize position (symbol_id has no atomicity annotation, so direct access)
         sec->position.symbol_id = static_cast<uint32_t>(i);
-        sec->position.quantity = 0;
-        sec->position.avg_price = 0;
-        sec->position.realized_pnl = 0;
-        sec->position.unrealized_pnl = 0;
+        pos_prod.set_quantity(0);
+        pos_prod.set_avg_price(0);
+        pos_prod.set_realized_pnl(0);
+        pos_prod.set_unrealized_pnl(0);
 
         securities.push_back(sec);
+        quote_producers.push_back(quote_prod);
+        position_producers.push_back(pos_prod);
         std::cout << "Created " << symbols[i] << " security\n";
     }
 
@@ -77,47 +89,50 @@ int main() {
         auto now = std::chrono::steady_clock::now().time_since_epoch().count();
 
         for (size_t i = 0; i < securities.size(); ++i) {
-            auto& quote = securities[i]->quote;
-            auto& position = securities[i]->position;
+            auto& quote_prod = quote_producers[i];
+            auto& pos_prod = position_producers[i];
 
-            // Update quotes with price movement
-            quote.bid_price += price_delta(gen);
-            if (quote.bid_price < 1000) quote.bid_price = 1000;
-            quote.ask_price = quote.bid_price + 5;
+            // Update quotes with price movement (using synchronized setters)
+            int64_t bid = quote_prod.get_bid_price() + price_delta(gen);
+            if (bid < 1000) bid = 1000;
+            quote_prod.set_bid_price(bid);
+            quote_prod.set_ask_price(bid + 5);
 
-            int new_bid_size = static_cast<int>(quote.bid_size) + size_change(gen);
+            int new_bid_size = static_cast<int>(quote_prod.get_bid_size()) + size_change(gen);
             if (new_bid_size < 10) new_bid_size = 10;
-            quote.bid_size = static_cast<uint32_t>(new_bid_size);
+            quote_prod.set_bid_size(static_cast<uint32_t>(new_bid_size));
 
-            int new_ask_size = static_cast<int>(quote.ask_size) + size_change(gen);
+            int new_ask_size = static_cast<int>(quote_prod.get_ask_size()) + size_change(gen);
             if (new_ask_size < 10) new_ask_size = 10;
-            quote.ask_size = static_cast<uint32_t>(new_ask_size);
+            quote_prod.set_ask_size(static_cast<uint32_t>(new_ask_size));
 
-            quote.timestamp_ns = static_cast<uint64_t>(now);
+            quote_prod.set_timestamp_ns(static_cast<uint64_t>(now));
 
             // Occasionally change position
             if (tick % 100 == i * 20) {
                 int pos_change = (gen() % 3) - 1;  // -1, 0, or 1
-                position.quantity += pos_change * 100;
+                int64_t qty = pos_prod.get_quantity() + pos_change * 100;
+                pos_prod.set_quantity(qty);
 
-                if (position.quantity != 0 && position.avg_price == 0) {
-                    position.avg_price = quote.bid_price;
+                if (qty != 0 && pos_prod.get_avg_price() == 0) {
+                    pos_prod.set_avg_price(bid);
                 }
             }
 
             // Update P&L
-            if (position.quantity != 0) {
-                int64_t mark = quote.bid_price;
-                position.unrealized_pnl =
-                    (mark - position.avg_price) * position.quantity;
+            int64_t qty = pos_prod.get_quantity();
+            if (qty != 0) {
+                int64_t mark = quote_prod.get_bid_price();
+                int64_t avg = pos_prod.get_avg_price();
+                pos_prod.set_unrealized_pnl((mark - avg) * qty);
             }
         }
 
         // Print status every second
         if (tick % 100 == 0) {
             std::cout << "\rTick " << tick << ": ";
-            for (size_t i = 0; i < securities.size() && i < 3; ++i) {
-                std::cout << symbols[i] << "=" << securities[i]->quote.bid_price << " ";
+            for (size_t i = 0; i < quote_producers.size() && i < 3; ++i) {
+                std::cout << symbols[i] << "=" << quote_producers[i].get_bid_price() << " ";
             }
             std::cout << "          " << std::flush;
         }

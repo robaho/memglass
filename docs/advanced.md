@@ -21,11 +21,11 @@ memglass supports nested POD structs. Fields are flattened with dot notation in 
 
 ```cpp
 struct [[memglass::observe]] Quote {
-    int64_t bid_price;   // @seqlock
-    int64_t ask_price;
-    uint32_t bid_size;
-    uint32_t ask_size;
-    uint64_t timestamp_ns;
+    int64_t bid_price;   // @atomic
+    int64_t ask_price;   // @atomic
+    uint32_t bid_size;   // @atomic
+    uint32_t ask_size;   // @atomic
+    uint64_t timestamp_ns; // @atomic
 };
 
 struct [[memglass::observe]] Position {
@@ -83,11 +83,11 @@ The memglass viewer shows nested structs as expandable groups:
 ```
 [-] AAPL (Security)
   [-] quote
-        bid_price        =          15023 [seqlock]
-        ask_price        =          15028
-        bid_size         =            142
-        ask_size         =             98
-        timestamp_ns     = 1704825432123456789
+        bid_price        =          15023 [atomic]
+        ask_price        =          15028 [atomic]
+        bid_size         =            142 [atomic]
+        ask_size         =             98 [atomic]
+        timestamp_ns     = 1704825432123456789 [atomic]
   [-] position
         symbol_id        =              0
         quantity         =            500 [atomic]
@@ -100,16 +100,40 @@ The memglass viewer shows nested structs as expandable groups:
 
 ## Synchronization Primitives
 
-memglass provides three levels of synchronization for field access, specified via comment annotations.
+memglass provides three levels of synchronization for field access, specified via comment annotations. The code generator creates **producer wrapper classes** that enforce these semantics.
 
 ### Overview
 
-| Level | Annotation | Mechanism | Use Case |
-|-------|------------|-----------|----------|
-| None | (default) | Direct read/write | Non-critical data, debugging |
-| Atomic | `@atomic` | `std::atomic<T>` | Single primitive values |
+| Level | Annotation | Producer Wrapper Uses | Use Case |
+|-------|------------|----------------------|----------|
+| None | (default) | Direct assignment | Non-critical data, debugging |
+| Atomic | `@atomic` | `std::atomic_ref<T>` | Single primitive values |
 | Seqlock | `@seqlock` | `Guarded<T>` | Compound types, read-heavy |
 | Locked | `@locked` | `Locked<T>` | Complex operations, RMW |
+
+### Producer Wrappers
+
+The code generator creates `*Producer` wrapper classes that enforce synchronization. **Always use these wrappers in your producer code** - direct field access bypasses synchronization and can cause torn reads on observers.
+
+```cpp
+// Generated code (in my_types_generated.hpp):
+class StatsProducer {
+public:
+    explicit StatsProducer(Stats* ptr);
+
+    // @atomic fields use std::atomic_ref with proper memory ordering
+    void set_counter(uint64_t value) noexcept;
+    uint64_t get_counter() const noexcept;
+
+    void set_last_value(int64_t value) noexcept;
+    int64_t get_last_value() const noexcept;
+
+    Stats* raw();  // Access underlying pointer if needed
+};
+
+// Helper function
+inline StatsProducer make_producer(Stats* ptr);
+```
 
 ### Atomic Fields
 
@@ -122,26 +146,42 @@ struct [[memglass::observe]] Stats {
 };
 ```
 
-**Producer usage:**
+**Producer usage (correct):**
 ```cpp
-stats->counter++;  // Compiler generates atomic increment
+auto stats_prod = memglass::generated::make_producer(stats);
+stats_prod.set_counter(stats_prod.get_counter() + 1);  // Atomic operations
+```
+
+**Producer usage (WRONG - bypasses synchronization):**
+```cpp
+stats->counter++;  // Direct access - may cause torn reads!
 ```
 
 **Observer usage:**
 ```cpp
-uint64_t c = view["counter"];  // Atomic load
+uint64_t c = view["counter"];  // Atomic load via std::atomic_ref
 ```
 
 Supported atomic types: `bool`, `int8-64`, `uint8-64`, `float`, `double`
 
 ### Seqlock Fields (`Guarded<T>`)
 
-For compound types that must be read/written atomically as a unit:
+For **compound struct types** that must be read/written atomically as a unit.
+
+**Important:** `@seqlock` should only be used on struct fields, not primitives. For primitive fields like `int64_t`, use `@atomic` instead.
 
 ```cpp
+// First, define a nested struct type
+struct QuoteData {
+    int64_t bid_price;
+    int64_t ask_price;
+    uint32_t bid_size;
+    uint32_t ask_size;
+};
+
 struct [[memglass::observe]] MarketData {
-    Quote best_quote;        // @seqlock
-    Quote last_trade;        // @seqlock
+    Guarded<QuoteData> best_quote;   // @seqlock - use Guarded<T> wrapper
+    Guarded<QuoteData> last_trade;   // @seqlock
 };
 ```
 
@@ -155,20 +195,26 @@ struct [[memglass::observe]] MarketData {
 **Producer usage:**
 ```cpp
 // The Guarded<T> wrapper handles seqlock automatically
-market_data->best_quote.write(Quote{.bid_price=15020, .ask_price=15025});
+QuoteData q{.bid_price=15020, .ask_price=15025, .bid_size=100, .ask_size=50};
+market_data->best_quote.write(q);
 ```
 
 **Observer usage:**
 ```cpp
-// Automatic seqlock handling
-Quote q = view["best_quote"];
+// Automatic seqlock handling - spins until consistent read
+QuoteData q = view["best_quote"];
 
 // Non-blocking try-read (returns nullopt if write in progress)
-auto maybe_quote = view["best_quote"].try_get<Quote>();
+auto maybe_quote = view["best_quote"].try_get<QuoteData>();
 if (maybe_quote) {
     // Got consistent value
 }
 ```
+
+**When to use `@seqlock` vs `@atomic`:**
+- Use `@atomic` for individual primitive fields (most common case)
+- Use `@seqlock` only when you need to update multiple fields atomically as a group
+- With `@seqlock`, the struct field must be declared as `Guarded<T>` in your type definition
 
 ### Locked Fields (`Locked<T>`)
 
@@ -270,7 +316,10 @@ The `memglass-gen` tool uses libclang to parse C++ headers and generate type reg
 2. Finds structs with `[[memglass::observe]]` attribute
 3. Extracts field names, types, offsets, sizes
 4. Parses comment annotations (`@atomic`, `@seqlock`, etc.)
-5. Generates type descriptors and registration functions
+5. Generates:
+   - **Type descriptors** for observer reflection
+   - **Producer wrapper classes** (`*Producer`) that enforce synchronization
+   - **`make_producer()` helper functions** for creating wrappers
 
 ### Command Line Usage
 
@@ -290,11 +339,36 @@ memglass-gen header1.hpp header2.hpp -o generated.hpp
 ```cpp
 // my_types_generated.hpp (auto-generated)
 #pragma once
+#include <memglass/memglass.hpp>
 #include <memglass/registry.hpp>
-#include "my_types.hpp"
+#include <memglass/detail/seqlock.hpp>
+#include <atomic>
 
 namespace memglass::generated {
 
+// Producer wrapper - enforces synchronization on writes
+class CounterProducer {
+public:
+    explicit CounterProducer(Counter* ptr) : ptr_(ptr) {}
+
+    // @atomic field - uses std::atomic_ref
+    void set_value(uint64_t v) noexcept {
+        std::atomic_ref<uint64_t>{ptr_->value}.store(v, std::memory_order_release);
+    }
+    uint64_t get_value() const noexcept {
+        return std::atomic_ref<uint64_t>{ptr_->value}.load(std::memory_order_acquire);
+    }
+
+    // Non-atomic field - direct access
+    void set_timestamp(uint64_t v) noexcept { ptr_->timestamp = v; }
+    uint64_t get_timestamp() const noexcept { return ptr_->timestamp; }
+
+    Counter* raw() { return ptr_; }
+private:
+    Counter* ptr_;
+};
+
+// Type registration
 inline uint32_t register_Counter() {
     memglass::TypeDescriptor desc;
     desc.name = "Counter";
@@ -312,6 +386,11 @@ inline uint32_t register_Counter() {
 inline void register_all_types() {
     register_Counter();
     // ... other types
+}
+
+// Helper to create producer wrappers
+inline CounterProducer make_producer(Counter* ptr) {
+    return CounterProducer(ptr);
 }
 
 } // namespace memglass::generated
