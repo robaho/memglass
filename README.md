@@ -1,8 +1,8 @@
 ## WARNING
 
-I forked this project to issue a warning to others. the synchronization is fundamentally broken and will result inconsistent object reads. 
+I forked this project to issue a warning to others. The synchronization is fundamentally broken and will result inconsistent object reads. 
 
-When the author is provided feedback, he deletes the issues, or blocks you (especially on LinkedIn). I suspect his PHD+ego makes him incapable of dealing with public criticsm and incapable of responding like an actual scientist or simpky polite person. 
+When the author is provided feedback, he deletes the issues, or blocks you (especially on LinkedIn). I suspect his PHD+ego makes him incapable of dealing with public criticsm and incapable of responding like an actual scientist or simply polite person. 
 
 You have been warned. 
 
